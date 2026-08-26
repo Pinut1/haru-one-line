@@ -1,0 +1,7 @@
+.vercel/
+node_modules/
+server/node_modules/
+.env
+.env.*
+*.log
+preview.png

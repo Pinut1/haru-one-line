@@ -1,0 +1,2 @@
+import { createPool,migrate } from "./db.js";import { createFirebaseVerifier } from "./auth.js";import { createApp } from "./app.js";
+const port=Number(process.env.PORT)||3000;const pool=createPool();await migrate(pool);const app=createApp({pool,verifyToken:createFirebaseVerifier()});const server=app.listen(port,"0.0.0.0",()=>console.log(`Haru API listening on ${port}`));async function shutdown(){server.close(async()=>{await pool.end();process.exit(0)})}process.on("SIGTERM",shutdown);process.on("SIGINT",shutdown);
