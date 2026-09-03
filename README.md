@@ -17,6 +17,12 @@ Vercel 정적 프런트엔드
 - API: https://haru-one-line-api.onrender.com
 - 상태 확인: https://haru-one-line-api.onrender.com/health
 
+## Firebase 웹 클라이언트 설정
+
+Firebase 웹 클라이언트 설정은 루트 `config.js`의 `HARU_FIREBASE_CONFIG`에서 읽습니다. 이 값은 브라우저에서 사용되는 공개 웹 클라이언트 설정이므로 저장소에 커밋하는 것이 의도된 구성입니다. API 주소는 같은 파일의 `HARU_API_URL`에서 설정합니다. 실제 설정 값은 이 문서에 반복하지 않습니다.
+
+Firebase Authentication에서 Google 로그인을 활성화하고 배포 도메인을 승인된 도메인에 추가해야 합니다.
+
 ## 로컬 실행
 
 프런트엔드:

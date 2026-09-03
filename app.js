@@ -1,4 +1,4 @@
-import { initializeApp, deleteApp } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-app.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-app.js";
 import {
   getAuth,
   GoogleAuthProvider,
@@ -7,15 +7,13 @@ import {
   signOut,
 } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-auth.js";
 
-const CONFIG_KEY = "haru_firebase_config";
 const ENTRIES_KEY = "haru_entries";
+const FIREBASE_CONFIG = window.HARU_FIREBASE_CONFIG;
 const API_URL = (window.HARU_API_URL || "http://localhost:3000").replace(/\/$/, "");
 const $ = (selector) => document.querySelector(selector);
 
-let firebaseApp = null;
 let auth = null;
 let currentUser = null;
-let unsubscribe = null;
 let activeView = "personal";
 let rooms = [];
 let activeRoom = null;
@@ -23,14 +21,6 @@ let editingEntryId = null;
 let currentInviteToken = null;
 let currentInviteRoomId = null;
 let pendingInvite = readInviteFromUrl();
-
-function readConfig() {
-  try {
-    return JSON.parse(localStorage.getItem(CONFIG_KEY) || "null");
-  } catch {
-    return null;
-  }
-}
 
 function validConfig(config) {
   return (
@@ -41,60 +31,33 @@ function validConfig(config) {
   );
 }
 
-function parseFirebaseConfig(text) {
-  const value = text.trim();
-  try {
-    return JSON.parse(value);
-  } catch {
-    // Firebase's copy button commonly returns a JavaScript object literal.
-  }
-
-  const config = {};
-  const allowed = [
-    "apiKey",
-    "authDomain",
-    "projectId",
-    "storageBucket",
-    "messagingSenderId",
-    "appId",
-    "measurementId",
-  ];
-  for (const key of allowed) {
-    const match = value.match(new RegExp(`${key}\\s*:\\s*["']([^"']+)["']`));
-    if (match) config[key] = match[1];
-  }
-  return config;
-}
-
 async function connectFirebase() {
-  const config = readConfig();
-  if (!validConfig(config)) {
-    $("#loginStatus").textContent = "설정에서 Firebase를 먼저 연결해 주세요.";
+  if (!validConfig(FIREBASE_CONFIG)) {
+    $("#loginStatus").textContent = "로그인 서비스를 준비하지 못했습니다. 잠시 후 다시 시도해 주세요.";
     showGuest();
     return;
   }
 
   try {
-    if (unsubscribe) unsubscribe();
-    if (firebaseApp) await deleteApp(firebaseApp);
-    firebaseApp = initializeApp(config);
+    const firebaseApp = initializeApp(FIREBASE_CONFIG);
     auth = getAuth(firebaseApp);
-    unsubscribe = onAuthStateChanged(auth, (user) => {
+    onAuthStateChanged(auth, (user) => {
       if (user) {
         void showMember(user);
       } else {
         showGuest();
       }
     });
-    $("#loginStatus").textContent = "Firebase 연결 완료 · Google 계정으로 시작해 보세요.";
+    $("#loginStatus").textContent = "Google 계정으로 시작해 보세요.";
   } catch (error) {
-    showError(error, "Firebase 설정을 확인해 주세요.");
+    showError(error, "로그인 서비스를 준비하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+    showGuest();
   }
 }
 
 async function googleLogin() {
   if (!auth) {
-    openSettings();
+    $("#loginStatus").textContent = "로그인 서비스를 준비하지 못했습니다. 잠시 후 다시 시도해 주세요.";
     return;
   }
 
@@ -724,7 +687,6 @@ function escapeHtml(text) {
 
 $("#googleLogin").addEventListener("click", googleLogin);
 $("#previewButton").addEventListener("click", preview);
-$("#settingsButton").addEventListener("click", openSettings);
 $("#logoutButton").addEventListener("click", async () => {
   if (currentUser?.isPreview) showGuest();
   else if (auth) await signOut(auth);
@@ -821,37 +783,6 @@ $("#sharedEntries").addEventListener("click", (event) => {
   } else if (deleteId) {
     void deleteSharedEntry(deleteId);
   }
-});
-
-function openSettings() {
-  $("#firebaseConfig").value = localStorage.getItem(CONFIG_KEY) || "";
-  $("#settingsDialog").showModal();
-}
-
-$("#settingsForm").addEventListener("submit", async (event) => {
-  if (event.submitter?.value !== "save") return;
-  event.preventDefault();
-  const field = $("#firebaseConfig");
-  const config = parseFirebaseConfig(field.value);
-  if (!validConfig(config)) {
-    field.setCustomValidity("apiKey, authDomain, projectId, appId가 모두 있는지 확인해 주세요.");
-    field.reportValidity();
-    return;
-  }
-  localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
-  $("#settingsDialog").close();
-  await connectFirebase();
-});
-$("#firebaseConfig").addEventListener("input", (event) => event.target.setCustomValidity(""));
-$("#clearConfig").addEventListener("click", async () => {
-  localStorage.removeItem(CONFIG_KEY);
-  if (unsubscribe) unsubscribe();
-  if (firebaseApp) await deleteApp(firebaseApp);
-  firebaseApp = null;
-  auth = null;
-  showGuest();
-  $("#settingsDialog").close();
-  $("#loginStatus").textContent = "설정에서 Firebase를 먼저 연결해 주세요.";
 });
 
 connectFirebase();
