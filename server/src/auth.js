@@ -21,6 +21,9 @@ export function createAuthMiddleware(verifyToken) {
 
     try {
       const decoded = await verifyToken(match[1]);
+      if (!decoded || typeof decoded.uid !== "string" || !decoded.uid.trim()) {
+        throw new Error("Firebase token did not contain a uid");
+      }
       req.user = { uid: decoded.uid, email: decoded.email || null };
       next();
     } catch (error) {
