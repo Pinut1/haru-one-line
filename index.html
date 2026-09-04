@@ -119,13 +119,13 @@
 
     <dialog id="roomDialog" aria-labelledby="roomDialogTitle">
       <form id="roomForm" method="dialog">
-        <button class="close" value="cancel" type="submit" aria-label="닫기">×</button>
+        <button class="close" value="cancel" type="submit" formnovalidate aria-label="닫기">×</button>
         <p class="eyebrow"><i aria-hidden="true"></i> START TOGETHER</p>
         <h2 id="roomDialogTitle">새 다이어리 만들기</h2>
         <p>친구 한 명을 초대해 둘만의 기록을 시작해 보세요.</p>
         <label for="roomName">다이어리 이름</label>
         <input id="roomName" maxlength="120" placeholder="예: 우리들의 9월" required>
-        <div class="actions"><button type="submit" value="cancel">취소</button><button class="save" type="submit" value="create">만들기</button></div>
+        <div class="actions"><button type="submit" value="cancel" formnovalidate>취소</button><button class="save" type="submit" value="create">만들기</button></div>
       </form>
     </dialog>
   </body>
