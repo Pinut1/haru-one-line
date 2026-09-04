@@ -24,7 +24,12 @@ export function createAuthMiddleware(verifyToken) {
       if (!decoded || typeof decoded.uid !== "string" || !decoded.uid.trim()) {
         throw new Error("Firebase token did not contain a uid");
       }
-      req.user = { uid: decoded.uid, email: decoded.email || null };
+      req.user = {
+        uid: decoded.uid,
+        email: decoded.email || null,
+        name: decoded.name || decoded.displayName || null,
+        picture: decoded.picture || decoded.photoURL || null,
+      };
       next();
     } catch (error) {
       console.warn("Invalid Firebase token:", error.code || error.message);

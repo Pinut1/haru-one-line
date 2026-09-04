@@ -39,6 +39,53 @@ export async function migrate(pool) {
     CREATE INDEX IF NOT EXISTS journal_entries_owner_date_idx
       ON journal_entries (firebase_uid, created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS journal_entry_meta (
+      entry_id UUID PRIMARY KEY REFERENCES journal_entries(id) ON DELETE CASCADE,
+      entry_date DATE,
+      mood_emoji VARCHAR(16),
+      mood_color VARCHAR(20),
+      is_public BOOLEAN NOT NULL DEFAULT FALSE,
+      CHECK (mood_color IS NULL OR mood_color IN ('sage', 'blue', 'yellow', 'orange', 'rose', 'lavender'))
+    );
+    CREATE INDEX IF NOT EXISTS journal_entry_meta_date_idx
+      ON journal_entry_meta (entry_date DESC);
+    CREATE INDEX IF NOT EXISTS journal_entry_meta_public_idx
+      ON journal_entry_meta (is_public, entry_date DESC);
+
+    CREATE TABLE IF NOT EXISTS user_prompt_preferences (
+      firebase_uid TEXT PRIMARY KEY,
+      categories TEXT[] NOT NULL DEFAULT '{}',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS public_profiles (
+      firebase_uid TEXT PRIMARY KEY,
+      display_name VARCHAR(40) NOT NULL,
+      photo_url TEXT,
+      discoverable BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS public_profiles_discoverable_name_idx
+      ON public_profiles (discoverable, display_name);
+
+    CREATE TABLE IF NOT EXISTS follow_requests (
+      id UUID PRIMARY KEY,
+      follower_uid TEXT NOT NULL,
+      following_uid TEXT NOT NULL,
+      status VARCHAR(10) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'accepted', 'rejected')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (follower_uid <> following_uid),
+      UNIQUE (follower_uid, following_uid)
+    );
+    CREATE INDEX IF NOT EXISTS follow_requests_incoming_idx
+      ON follow_requests (following_uid, status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS follow_requests_outgoing_idx
+      ON follow_requests (follower_uid, status, updated_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS follow_requests_pair_idx
+      ON follow_requests (LEAST(follower_uid, following_uid), GREATEST(follower_uid, following_uid));
+
     CREATE TABLE IF NOT EXISTS diary_rooms (
       id UUID PRIMARY KEY,
       owner_uid TEXT NOT NULL,

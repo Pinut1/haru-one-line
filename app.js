@@ -8,6 +8,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-auth.js";
 
 const ENTRIES_KEY = "haru_entries";
+const MOOD_COLORS = new Set(["sage", "blue", "yellow", "orange", "rose", "lavender"]);
 const FIREBASE_CONFIG = window.HARU_FIREBASE_CONFIG;
 const API_URL = (window.HARU_API_URL || "http://localhost:3000").replace(/\/$/, "");
 const $ = (selector) => document.querySelector(selector);
@@ -21,7 +22,11 @@ let editingEntryId = null;
 let currentInviteToken = null;
 let currentInviteRoomId = null;
 let personalEntries = [];
+let personalCalendarEntries = [];
 let personalDateFilter = "";
+let feedEntries = [];
+let currentProfile = null;
+let promptPreferences = [];
 let pendingInvite = readInviteFromUrl();
 
 function validConfig(config) {
@@ -100,8 +105,13 @@ async function showMember(user) {
   await renderPersonalEntries();
 
   if (!user.isPreview) {
+    await syncProfile();
+    await loadPromptPreferences();
+    await renderPersonalPrompt();
     await renderRooms();
     if (pendingInvite) preparePendingInvite();
+  } else {
+    await renderPersonalPrompt();
   }
 }
 
@@ -114,6 +124,7 @@ function showGuest() {
   $(".room-list-title").hidden = false;
   $("#joinForm").hidden = false;
   $("#createRoomButton").disabled = false;
+  $("#personalPrompt").hidden = true;
   $("#memberView").hidden = true;
   $("#guestView").hidden = false;
 }
@@ -165,6 +176,9 @@ function localDate(value) {
 // KST evening record onto the following day.
 function entryLocalDate(entry) {
   if (!entry) return "";
+  if (typeof entry.entry_date === "string" && /^\d{4}-\d{2}-\d{2}/.test(entry.entry_date)) {
+    return entry.entry_date.slice(0, 10);
+  }
   if (entry.created_at) {
     const createdDate = localDate(entry.created_at);
     if (createdDate) return createdDate;
@@ -232,7 +246,7 @@ function setSharedStatus(message, isError = false) {
 }
 
 function setView(view) {
-  activeView = view === "shared" ? "shared" : "personal";
+  activeView = ["shared", "feed"].includes(view) ? view : "personal";
   document.querySelectorAll(".mode-button").forEach((button) => {
     const active = button.dataset.view === activeView;
     button.classList.toggle("active", active);
@@ -241,16 +255,41 @@ function setView(view) {
   });
   $("#personalPanel").hidden = activeView !== "personal";
   $("#sharedPanel").hidden = activeView !== "shared";
+  $("#feedPanel").hidden = activeView !== "feed";
 
   if (activeView === "shared") {
     if (currentUser?.isPreview) showPreviewShared();
     else if (currentUser) void renderRooms();
+  } else if (activeView === "feed") {
+    if (currentUser?.isPreview) showPreviewFeed();
+    else if (currentUser) void renderFeed();
   }
 }
 
 function buildEntryCard(entry) {
   const article = document.createElement("article");
   article.className = "entry";
+  if (entry.mood_color && MOOD_COLORS.has(entry.mood_color)) {
+    article.classList.add(`mood-${entry.mood_color}`);
+  }
+  if (entry.mood_emoji || entry.mood_color || entry.is_public) {
+    const mood = document.createElement("div");
+    mood.className = "entry-mood";
+    if (entry.mood_emoji) mood.append(entry.mood_emoji);
+    if (entry.mood_color) {
+      const color = document.createElement("i");
+      color.className = `mood-${entry.mood_color}`;
+      color.setAttribute("aria-label", `${entry.mood_color} 색상`);
+      mood.append(color);
+    }
+    if (entry.is_public) {
+      const publicLabel = document.createElement("span");
+      publicLabel.className = "entry-public";
+      publicLabel.textContent = "친구 공개";
+      mood.append(publicLabel);
+    }
+    article.append(mood);
+  }
   const paragraph = document.createElement("p");
   // textContent keeps the raw line breaks; `white-space: pre-wrap` in the
   // stylesheet is what makes them visible.
@@ -268,7 +307,11 @@ function buildEntryCard(entry) {
   remove.dataset.deletePersonal = entry.id;
   remove.setAttribute("aria-label", "기록 삭제");
   remove.textContent = "삭제";
-  actions.append(remove);
+  const visibility = document.createElement("button");
+  visibility.type = "button";
+  visibility.dataset.togglePublic = entry.id;
+  visibility.textContent = entry.is_public ? "공개 끄기" : "친구에게 공개";
+  actions.append(visibility, remove);
   footer.append(date, actions);
   article.append(paragraph, footer);
   return article;
@@ -319,10 +362,72 @@ function drawPersonalEntries(entries) {
   }
 }
 
+function dateOnly(value) {
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.valueOf()) ? null : date;
+}
+
+function shiftLocalDate(value, days) {
+  const date = dateOnly(value);
+  if (!date) return "";
+  date.setDate(date.getDate() + days);
+  return localDate(date);
+}
+
+function drawPersonalCalendar(entries) {
+  const grid = $("#calendarGrid");
+  if (!grid) return;
+  grid.replaceChildren();
+  const end = localDate();
+  const start = shiftLocalDate(end, -364);
+  const byDate = new Map();
+  for (const entry of entries) {
+    const date = entryLocalDate(entry);
+    if (!date) continue;
+    const items = byDate.get(date) || [];
+    items.push(entry);
+    byDate.set(date, items);
+  }
+
+  const startDate = dateOnly(start);
+  const leading = startDate?.getDay() || 0;
+  for (let index = 0; index < leading; index += 1) {
+    const blank = document.createElement("span");
+    blank.className = "calendar-cell calendar-blank";
+    blank.setAttribute("aria-hidden", "true");
+    grid.append(blank);
+  }
+
+  for (let index = 0; index < 365; index += 1) {
+    const date = shiftLocalDate(start, index);
+    const items = byDate.get(date) || [];
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "calendar-cell";
+    const level = Math.min(items.length, 3);
+    if (level) cell.classList.add(`level-${level}`);
+    const moodColor = items.find((entry) => MOOD_COLORS.has(entry.mood_color))?.mood_color;
+    if (moodColor) cell.classList.add(`mood-${moodColor}`);
+    if (date === end) cell.classList.add("is-today");
+    cell.dataset.calendarDate = date;
+    cell.setAttribute("role", "gridcell");
+    cell.setAttribute("aria-label", `${shortDateText(date)} · ${items.length}개의 기록`);
+    cell.title = `${shortDateText(date)} · ${items.length}개`;
+    grid.append(cell);
+  }
+
+  const recordedDays = [...byDate.entries()].filter(([, items]) => items.length);
+  const totalEntries = entries.length;
+  $("#calendarSummary").textContent = `${recordedDays.length}일 기록 · ${totalEntries}개 순간`;
+  $("#calendarMonths").textContent = `${shortDateText(start)} ~ ${shortDateText(end)}`;
+}
+
 async function renderPersonalEntries() {
   if (!currentUser) return;
   if (currentUser.isPreview) {
     personalEntries = getLocalEntries();
+    personalCalendarEntries = personalEntries;
+    drawPersonalCalendar(personalCalendarEntries);
     drawPersonalEntries(personalEntries);
     return;
   }
@@ -331,8 +436,13 @@ async function renderPersonalEntries() {
   try {
     // The archive groups by day, so pull a wide window rather than the
     // server's default page of 100.
-    const body = await apiRequest("/api/entries?limit=1000");
+    const [body, calendar] = await Promise.all([
+      apiRequest("/api/entries?limit=1000"),
+      apiRequest("/api/entries/calendar"),
+    ]);
     personalEntries = body.entries || [];
+    personalCalendarEntries = calendar.entries || personalEntries;
+    drawPersonalCalendar(personalCalendarEntries);
     drawPersonalEntries(personalEntries);
   } catch (error) {
     console.error(error);
@@ -414,6 +524,332 @@ async function renderRooms() {
   }
 }
 
+function setFeedStatus(message, isError = false) {
+  const status = $("#feedStatus");
+  status.textContent = message || "";
+  status.classList.toggle("error", isError);
+}
+
+function profileImage(profile, fallback = "친구") {
+  return profile?.photo_url || avatar(profile?.display_name || fallback);
+}
+
+function drawProfileForm(profile) {
+  if (!profile) return;
+  $("#profileDisplayName").value = profile.display_name || "";
+  $("#profileDiscoverable").checked = profile.discoverable !== false;
+}
+
+async function syncProfile() {
+  if (!currentUser || currentUser.isPreview) return;
+  try {
+    const existing = await apiRequest("/api/me/profile");
+    currentProfile = existing.profile;
+    if (!existing.has_profile) {
+      const created = await apiRequest("/api/me/profile", {
+        method: "PUT",
+        body: JSON.stringify({
+          display_name: currentUser.displayName || "하루 기록자",
+          photo_url: currentUser.photoURL || null,
+          discoverable: true,
+        }),
+      });
+      currentProfile = created.profile;
+    }
+    drawProfileForm(currentProfile);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function loadPromptPreferences() {
+  if (!currentUser || currentUser.isPreview) return;
+  try {
+    const body = await apiRequest("/api/me/prompt-preferences");
+    promptPreferences = body.categories || [];
+    document.querySelectorAll("#promptSettings input[type='checkbox']").forEach((input) => {
+      input.checked = promptPreferences.includes(input.value);
+    });
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function renderPersonalPrompt() {
+  if (!currentUser || currentUser.isPreview) {
+    $("#personalPrompt").hidden = true;
+    return;
+  }
+  try {
+    const body = await apiRequest("/api/prompts/today?date=" + encodeURIComponent(localDate()));
+    $("#personalPrompt").hidden = false;
+    $("#personalPromptCategory").textContent = body.prompt.category;
+    $("#personalPromptText").textContent = body.prompt.text;
+  } catch (error) {
+    $("#personalPrompt").hidden = true;
+    console.error(error);
+  }
+}
+
+async function savePromptPreferences() {
+  if (!currentUser || currentUser.isPreview) return;
+  const button = $("#savePromptPreferences");
+  const categories = [...document.querySelectorAll("#promptSettings input[type='checkbox']:checked")].map((input) => input.value);
+  button.disabled = true;
+  try {
+    const body = await apiRequest("/api/me/prompt-preferences", {
+      method: "PUT",
+      body: JSON.stringify({ categories }),
+    });
+    promptPreferences = body.categories || [];
+    await renderPersonalPrompt();
+    setSharedStatus("주제 취향을 저장했어요.");
+  } catch (error) {
+    setSharedStatus(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function renderRoomPrompt() {
+  if (!activeRoom?.room || !currentUser || currentUser.isPreview) return;
+  const date = $("#sharedDate").value || localDate();
+  try {
+    const body = await apiRequest(
+      "/api/rooms/" + encodeURIComponent(activeRoom.room.id) + "/prompt?date=" + encodeURIComponent(date),
+    );
+    $("#roomPrompt").hidden = false;
+    $("#roomPromptCategory").textContent = body.prompt.category;
+    $("#roomPromptText").textContent = body.prompt.text;
+  } catch (error) {
+    $("#roomPrompt").hidden = true;
+    console.error(error);
+  }
+}
+
+function showPreviewFeed() {
+  setFeedStatus("친구 피드는 로그인 후 사용할 수 있어요. 프리뷰에서는 개인 기록만 이 브라우저에 저장됩니다.");
+  $("#userSearchResults").replaceChildren();
+  $("#incomingRequests").replaceChildren();
+  $("#feedEntries").innerHTML = '<p class="empty">로그인하면 승인된 친구들의 공개 기록을 볼 수 있어요.</p>';
+}
+
+function drawSearchResults(users) {
+  const list = $("#userSearchResults");
+  list.replaceChildren();
+  if (!users.length) {
+    const empty = document.createElement("small");
+    empty.className = "empty";
+    empty.textContent = "검색 결과가 없어요.";
+    list.append(empty);
+    return;
+  }
+  for (const user of users) {
+    const item = document.createElement("div");
+    item.className = "social-item";
+    const image = document.createElement("img");
+    image.src = profileImage(user);
+    image.alt = "";
+    const info = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = user.display_name;
+    const detail = document.createElement("small");
+    detail.textContent = user.follow_status === "accepted"
+      ? "친구"
+      : user.follow_status === "pending"
+        ? "요청을 보냈어요"
+        : "공개 프로필";
+    info.append(name, detail);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.followUid = user.uid;
+    button.dataset.followStatus = user.follow_status || "none";
+    if (user.follow_status === "accepted") {
+      button.className = "danger";
+      button.textContent = "팔로우 취소";
+    } else if (user.follow_status === "pending") {
+      button.disabled = true;
+      button.textContent = "요청 중";
+    } else {
+      button.textContent = "친구 요청";
+    }
+    item.append(image, info, button);
+    list.append(item);
+  }
+}
+
+async function searchUsers() {
+  const query = $("#userSearchInput").value.trim();
+  if (!query) {
+    $("#userSearchResults").replaceChildren();
+    return;
+  }
+  try {
+    const body = await apiRequest("/api/users/search?q=" + encodeURIComponent(query));
+    drawSearchResults(body.users || []);
+  } catch (error) {
+    setFeedStatus(error.message, true);
+  }
+}
+
+function drawIncomingRequests(requests) {
+  const list = $("#incomingRequests");
+  list.replaceChildren();
+  if (!requests.length) {
+    const empty = document.createElement("small");
+    empty.textContent = "새로운 친구 요청이 없어요.";
+    list.append(empty);
+    return;
+  }
+  for (const request of requests) {
+    const item = document.createElement("div");
+    item.className = "social-item";
+    const image = document.createElement("img");
+    image.src = profileImage(request.user);
+    image.alt = "";
+    const info = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = request.user.display_name;
+    const detail = document.createElement("small");
+    detail.textContent = "친구가 되고 싶어 해요.";
+    info.append(name, detail);
+    const accept = document.createElement("button");
+    accept.type = "button";
+    accept.dataset.acceptRequest = request.id;
+    accept.textContent = "수락";
+    const reject = document.createElement("button");
+    reject.type = "button";
+    reject.className = "danger";
+    reject.dataset.rejectRequest = request.id;
+    reject.textContent = "거절";
+    item.append(image, info, accept, reject);
+    list.append(item);
+  }
+}
+
+async function loadFollowRequests() {
+  const body = await apiRequest("/api/me/follow-requests");
+  drawIncomingRequests(body.incoming || []);
+}
+
+function drawFeedEntries(entries) {
+  const list = $("#feedEntries");
+  list.replaceChildren();
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.innerHTML = "아직 친구의 공개 기록이 없어요.<br>친구를 찾아 요청을 보내 보세요.";
+    list.append(empty);
+    return;
+  }
+  for (const entry of entries) {
+    const article = document.createElement("article");
+    article.className = "entry feed-entry";
+    const author = document.createElement("div");
+    author.className = "feed-author";
+    const image = document.createElement("img");
+    image.src = profileImage(entry.author);
+    image.alt = "";
+    const name = document.createElement("strong");
+    name.textContent = entry.author?.display_name || "친구";
+    author.append(image, name);
+    const paragraph = document.createElement("p");
+    paragraph.textContent = entry.content;
+    if ((entry.content || "").includes("\n")) paragraph.classList.add("multiline");
+    const meta = document.createElement("div");
+    meta.className = "entry-meta";
+    const date = document.createElement("span");
+    date.textContent = shortDateText(entry.entry_date);
+    const mood = document.createElement("span");
+    mood.className = "mood";
+    mood.textContent = entry.mood_emoji || "";
+    meta.append(date, mood);
+    article.append(author, paragraph, meta);
+    list.append(article);
+  }
+}
+
+async function loadFeedEntries() {
+  const body = await apiRequest("/api/feed?limit=100");
+  feedEntries = body.entries || [];
+  drawFeedEntries(feedEntries);
+}
+
+async function renderFeed() {
+  if (!currentUser || currentUser.isPreview) {
+    showPreviewFeed();
+    return;
+  }
+  setFeedStatus("친구 피드를 불러오는 중…");
+  try {
+    await Promise.all([loadFollowRequests(), loadFeedEntries()]);
+    setFeedStatus("공개한 기록만 친구 피드에 보여요.");
+  } catch (error) {
+    setFeedStatus(error.message, true);
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = error.message;
+    $("#feedEntries").replaceChildren(empty);
+  }
+}
+
+async function sendFollow(uid) {
+  try {
+    await apiRequest("/api/users/" + encodeURIComponent(uid) + "/follow", { method: "POST" });
+    await searchUsers();
+    setFeedStatus("친구 요청을 보냈어요.");
+  } catch (error) {
+    setFeedStatus(error.message, true);
+  }
+}
+
+async function removeFollow(uid) {
+  try {
+    await apiRequest("/api/follows/" + encodeURIComponent(uid), { method: "DELETE" });
+    await searchUsers();
+    await loadFeedEntries();
+    setFeedStatus("친구 관계를 정리했어요.");
+  } catch (error) {
+    setFeedStatus(error.message, true);
+  }
+}
+
+async function respondToFollowRequest(id, status) {
+  try {
+    await apiRequest("/api/follow-requests/" + encodeURIComponent(id) + "/" + status, { method: "POST" });
+    await loadFollowRequests();
+    await loadFeedEntries();
+    setFeedStatus(status === "accept" ? "친구 요청을 수락했어요." : "친구 요청을 거절했어요.");
+  } catch (error) {
+    setFeedStatus(error.message, true);
+  }
+}
+
+async function saveProfile() {
+  if (!currentUser || currentUser.isPreview) return;
+  const button = $("#profileForm button[type='submit']");
+  const displayName = $("#profileDisplayName").value.trim();
+  if (!displayName) return;
+  button.disabled = true;
+  try {
+    const body = await apiRequest("/api/me/profile", {
+      method: "PUT",
+      body: JSON.stringify({
+        display_name: displayName,
+        photo_url: currentUser.photoURL || currentProfile?.photo_url || null,
+        discoverable: $("#profileDiscoverable").checked,
+      }),
+    });
+    currentProfile = body.profile;
+    drawProfileForm(currentProfile);
+    setFeedStatus("공개 프로필을 저장했어요.");
+  } catch (error) {
+    setFeedStatus(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function showPreviewShared() {
   $("#createRoomButton").disabled = true;
   $("#joinForm").hidden = true;
@@ -478,7 +914,8 @@ function drawRoomDetail() {
   $(".room-list-title").hidden = true;
   $("#joinForm").hidden = true;
   $("#roomTitle").textContent = room.name;
-  $("#roomMeta").textContent = `${room.member_count || activeRoom.members?.length || 1}/2명 · ${owner ? "내가 만든 다이어리" : "초대받은 다이어리"}`;
+  const todayEntries = (activeRoom.entries || []).filter((entry) => entry.entry_date === localDate()).length;
+  $("#roomMeta").textContent = `${room.member_count || activeRoom.members?.length || 1}/2명 · ${owner ? "내가 만든 다이어리" : "초대받은 다이어리"} · 오늘 ${todayEntries}/2명 작성`;
   $("#leaveRoomButton").hidden = owner;
   $("#invitePanel").hidden = !owner;
   if (owner && currentInviteToken && currentInviteRoomId === room.id) {
@@ -487,6 +924,7 @@ function drawRoomDetail() {
   $("#sharedDate").value = $("#sharedDate").value || localDate();
   drawRoomEntries(activeRoom.entries || []);
   resetEditor();
+  void renderRoomPrompt();
 }
 
 function drawRoomEntries(entries) {
@@ -725,6 +1163,26 @@ async function leaveRoom() {
   }
 }
 
+async function togglePersonalVisibility(entryId) {
+  const entry = personalEntries.find((item) => item.id === entryId);
+  if (!entry || !currentUser) return;
+  const isPublic = !entry.is_public;
+  try {
+    if (currentUser.isPreview) {
+      const entries = getLocalEntries().map((item) => item.id === entryId ? { ...item, is_public: isPublic } : item);
+      localStorage.setItem(dataKey(), JSON.stringify(entries));
+    } else {
+      await apiRequest("/api/entries/" + encodeURIComponent(entryId) + "/visibility", {
+        method: "PATCH",
+        body: JSON.stringify({ is_public: isPublic }),
+      });
+    }
+    await renderPersonalEntries();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
 function preparePendingInvite() {
   if (!pendingInvite || !currentUser || currentUser.isPreview) return;
   activeView = "shared";
@@ -805,7 +1263,18 @@ $("#entryDateClear").addEventListener("click", () => {
   $("#entryDateFilter").value = "";
   drawPersonalEntries(personalEntries);
 });
+$("#calendarGrid").addEventListener("click", (event) => {
+  const date = event.target.closest("[data-calendar-date]")?.dataset.calendarDate;
+  if (!date) return;
+  personalDateFilter = date;
+  $("#entryDateFilter").value = date;
+  drawPersonalEntries(personalEntries);
+  $("#entries").scrollIntoView({ behavior: "smooth", block: "start" });
+});
 $("#sharedDate").value = localDate();
+$("#sharedDate").addEventListener("change", () => {
+  void renderRoomPrompt();
+});
 $("#todayLabel").textContent = new Intl.DateTimeFormat("ko-KR", {
   weekday: "long",
   month: "long",
@@ -829,17 +1298,30 @@ $("#journalForm").addEventListener("submit", async (event) => {
         text: content,
         created_at: new Date().toISOString(),
         date: localDate(),
+        entry_date: localDate(),
+        mood_emoji: $("#moodEmoji").value || null,
+        mood_color: $("#moodColor").value || null,
+        is_public: $("#personalPublic").checked,
       });
       localStorage.setItem(dataKey(), JSON.stringify(entries));
     } else {
       await apiRequest("/api/entries", {
         method: "POST",
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({
+          content,
+          entry_date: localDate(),
+          mood_emoji: $("#moodEmoji").value || null,
+          mood_color: $("#moodColor").value || null,
+          is_public: $("#personalPublic").checked,
+        }),
       });
     }
     input.value = "";
     input.style.height = "auto";
     $("#charCount").textContent = "0";
+    $("#moodEmoji").value = "";
+    $("#moodColor").value = "";
+    $("#personalPublic").checked = false;
     await renderPersonalEntries();
   } catch (error) {
     alert(error.message);
@@ -849,6 +1331,13 @@ $("#journalForm").addEventListener("submit", async (event) => {
 });
 
 $("#entries").addEventListener("click", async (event) => {
+  const visibilityId = event.target.dataset.togglePublic;
+  if (visibilityId) {
+    event.target.disabled = true;
+    await togglePersonalVisibility(visibilityId);
+    event.target.disabled = false;
+    return;
+  }
   const id = event.target.dataset.deletePersonal;
   if (!id) return;
   event.target.disabled = true;
@@ -867,6 +1356,30 @@ $("#entries").addEventListener("click", async (event) => {
 
 document.querySelectorAll(".mode-button").forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view));
+});
+$("#savePromptPreferences").addEventListener("click", savePromptPreferences);
+$("#profileForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void saveProfile();
+});
+$("#userSearchForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void searchUsers();
+});
+$("#userSearchResults").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-follow-uid]");
+  if (!button || button.disabled) return;
+  if (button.dataset.followStatus === "accepted") void removeFollow(button.dataset.followUid);
+  else void sendFollow(button.dataset.followUid);
+});
+$("#incomingRequests").addEventListener("click", (event) => {
+  const acceptId = event.target.dataset.acceptRequest;
+  const rejectId = event.target.dataset.rejectRequest;
+  if (acceptId) void respondToFollowRequest(acceptId, "accept");
+  else if (rejectId) void respondToFollowRequest(rejectId, "reject");
+});
+$("#refreshFeedButton").addEventListener("click", () => {
+  void renderFeed();
 });
 $("#createRoomButton").addEventListener("click", createRoom);
 $("#roomForm").addEventListener("submit", submitRoom);

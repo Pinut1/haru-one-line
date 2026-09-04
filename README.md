@@ -9,7 +9,7 @@ Vercel 정적 프런트엔드
        └─ Neon PostgreSQL: 개인/공유 기록 저장
 ```
 
-프런트엔드는 Firebase ID 토큰을 API로 보냅니다. Render API는 토큰을 검증하고 Firebase `uid`를 기준으로 모든 개인 기록과 멤버십을 분리합니다. PostgreSQL 접속 정보와 공유 초대 토큰 원문은 브라우저에 노출되지 않으며, 초대 토큰은 데이터베이스에 SHA-256 해시로만 보관됩니다.
+프런트엔드는 Firebase ID 토큰을 API로 보냅니다. Render API는 토큰을 검증하고 Firebase `uid`를 기준으로 개인 기록, 공개 프로필, 친구 관계와 멤버십을 분리합니다. PostgreSQL 접속 정보와 공유 초대 토큰 원문은 브라우저에 노출되지 않으며, 초대 토큰은 데이터베이스에 SHA-256 해시로만 보관됩니다.
 
 ## 배포 주소
 
@@ -61,15 +61,32 @@ Authorization: Bearer <Firebase ID token>
 
 공유 room/entry 응답에는 인증된 사용자가 해당 room의 멤버인지 확인하는 쿼리가 먼저 실행됩니다. 멤버가 아닌 사용자는 room 목록에서도 제외되고, room 상세·기록 읽기/쓰기에서 `403`을 받습니다.
 
-기록 내용은 앞뒤 공백을 제거한 뒤 1~60자로 검증합니다. 줄바꿈은 기록의 일부로 저장되며, CRLF는 LF로 정규화하고 그 밖의 제어문자는 제거합니다. 연속된 빈 줄은 하나로 줄이고 앞뒤 빈 줄은 없앱니다. 줄바꿈 문자도 60자 제한에 포함됩니다. 공유 기록 날짜는 `YYYY-MM-DD` 형식의 실제 달력 날짜이며, 한 room에서 한 멤버가 같은 날짜에 가질 수 있는 기록은 하나입니다. 데이터베이스의 `(room_id, firebase_uid, entry_date)` unique 제약이 동시 요청까지 막습니다.
+기록 내용은 앞뒤 공백을 제거한 뒤 1~60자로 검증합니다. 줄바꿈은 기록의 일부로 저장되며, CRLF는 LF로 정규화하고 그 밖의 제어문자는 제거합니다. 연속된 빈 줄은 하나로 줄이고 앞뒤 빈 줄은 없앱니다. 줄바꿈 문자도 60자 제한에 포함됩니다. 개인 기록은 선택적인 기분 이모지·색상과 공개 여부를 함께 가질 수 있으며, 공개 기본값은 비공개입니다. 캘린더 날짜는 사용자가 선택한 `YYYY-MM-DD`를 우선하고, 기존 기록은 한국 시간 기준 생성 시각으로 보정합니다. 공유 기록 날짜는 `YYYY-MM-DD` 형식의 실제 달력 날짜이며, 한 room에서 한 멤버가 같은 날짜에 가질 수 있는 기록은 하나입니다. 데이터베이스의 `(room_id, firebase_uid, entry_date)` unique 제약이 동시 요청까지 막습니다.
 
 ## 개인 기록 API
 
 - `GET /api/entries`: 로그인한 사용자의 개인 기록. `?limit=`으로 개수를 조절하며 기본값 100, 최댓값 1000입니다. 잘못된 값은 기본값으로 처리합니다.
-- `POST /api/entries`: `{ "content": "오늘의 한 줄" }`로 개인 기록 생성
+- `GET /api/entries/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD`: 캘린더용 날짜 범위 기록 조회
+- `POST /api/entries`: `{ "content": "오늘의 한 줄", "entry_date": "2026-09-04", "mood_emoji": "😊", "mood_color": "sage", "is_public": false }`로 개인 기록 생성
+- `PATCH /api/entries/:id/visibility`: 본인 기록의 친구 공개 여부 변경
 - `DELETE /api/entries/:id`: 본인이 만든 개인 기록 삭제
 
 개인 기록은 `firebase_uid` 조건 없이는 조회·삭제할 수 없습니다.
+
+## 주제·친구 피드 API
+
+- `GET /api/prompts/today?date=YYYY-MM-DD`: 사용자 주제 설정을 반영한 오늘의 질문
+- `GET /api/rooms/:roomId/prompt?date=YYYY-MM-DD`: 멤버가 함께 보는 날짜별 교환 질문
+- `GET /api/me/prompt-preferences` 및 `PUT /api/me/prompt-preferences`: 주제 카테고리 설정
+- `GET /api/me/profile` 및 `PUT /api/me/profile`: 친구 검색에 사용할 공개 프로필 관리
+- `GET /api/users/search?q=닉네임`: 검색 허용 프로필 검색
+- `POST /api/users/:uid/follow`: 친구 요청 전송
+- `GET /api/me/follow-requests`: 받은 요청과 보낸 요청 조회
+- `POST /api/follow-requests/:id/accept` 또는 `/reject`: 받은 요청 처리
+- `DELETE /api/follows/:uid`: 내가 만든 친구 관계·요청 삭제
+- `GET /api/feed`: 승인된 친구의 공개 표시 기록 조회
+
+친구 피드는 승인된 관계에서만 동작합니다. 승인된 친구라도 기록 작성 시 `is_public: true`로 표시한 개인 기록만 볼 수 있으며, 이메일과 비공개 기록은 피드에 포함되지 않습니다.
 
 ## 공유 다이어리 API
 

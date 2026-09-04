@@ -31,6 +31,10 @@ class MemoryPool {
     this.invites = new Map();
     this.entries = new Map();
     this.personal = [];
+    this.personalMeta = new Map();
+    this.promptPreferences = new Map();
+    this.profiles = new Map();
+    this.followRequests = new Map();
   }
 
   memberKey(roomId, uid) {
@@ -46,13 +50,30 @@ class MemoryPool {
 
     if (query === "SELECT 1") return { rows: [{ "?column?": 1 }] };
 
-    if (query.startsWith("SELECT id, content, created_at FROM journal_entries")) {
+    if (query.startsWith("SELECT j.id, j.firebase_uid, j.content, j.created_at") && !query.includes("JOIN public_profiles")) {
       const limit = Number.isInteger(values[1]) ? values[1] : 100;
       return {
         rows: this.personal
           .filter((entry) => entry.firebase_uid === values[0])
-          .sort((a, b) => b.created_at.localeCompare(a.created_at))
-          .slice(0, limit),
+          .filter((entry) => {
+            if (!query.includes("BETWEEN $2 AND $3")) return true;
+            const date = this.personalMeta.get(entry.id)?.entry_date || entry.created_at.slice(0, 10);
+            return date >= values[1] && date <= values[2];
+          })
+          .sort((a, b) => {
+            const aDate = this.personalMeta.get(a.id)?.entry_date || a.created_at.slice(0, 10);
+            const bDate = this.personalMeta.get(b.id)?.entry_date || b.created_at.slice(0, 10);
+            return query.includes("ORDER BY entry_date ASC")
+              ? `${aDate}${a.created_at}`.localeCompare(`${bDate}${b.created_at}`)
+              : `${bDate}${b.created_at}`.localeCompare(`${aDate}${a.created_at}`);
+          })
+          .slice(0, query.includes("BETWEEN $2 AND $3") ? undefined : limit)
+          .map((entry) => ({
+            ...entry,
+            ...(this.personalMeta.get(entry.id) || {}),
+            entry_date: this.personalMeta.get(entry.id)?.entry_date || entry.created_at.slice(0, 10),
+            is_public: this.personalMeta.get(entry.id)?.is_public || false,
+          })),
       };
     }
     if (query.startsWith("INSERT INTO journal_entries")) {
@@ -61,12 +82,144 @@ class MemoryPool {
       this.personal.push(row);
       return { rows: [row] };
     }
+    if (query.startsWith("INSERT INTO journal_entry_meta")) {
+      if (query.includes("SELECT id, (created_at AT TIME ZONE")) {
+        const [entryId, uid, isPublic] = values;
+        const entry = this.personal.find((item) => item.id === entryId && item.firebase_uid === uid);
+        if (!entry) return { rowCount: 0, rows: [] };
+        const current = this.personalMeta.get(entryId) || { entry_id: entryId, entry_date: entry.created_at.slice(0, 10) };
+        const updated = { ...current, is_public: isPublic };
+        this.personalMeta.set(entryId, updated);
+        return { rowCount: 1, rows: [updated] };
+      }
+      const [entry_id, entry_date, mood_emoji, mood_color, is_public] = values;
+      const row = { entry_id, entry_date, mood_emoji, mood_color, is_public };
+      this.personalMeta.set(entry_id, row);
+      return { rowCount: 1, rows: [row] };
+    }
     if (query.startsWith("DELETE FROM journal_entries")) {
       const before = this.personal.length;
       this.personal = this.personal.filter(
         (entry) => !(entry.id === values[0] && entry.firebase_uid === values[1]),
       );
+      this.personalMeta.delete(values[0]);
       return { rowCount: before - this.personal.length };
+    }
+
+    if (query.startsWith("SELECT categories FROM user_prompt_preferences")) {
+      const row = this.promptPreferences.get(values[0]);
+      return { rows: row ? [row] : [] };
+    }
+    if (query.startsWith("SELECT categories, updated_at FROM user_prompt_preferences")) {
+      const row = this.promptPreferences.get(values[0]);
+      return { rows: row ? [row] : [] };
+    }
+    if (query.startsWith("INSERT INTO user_prompt_preferences")) {
+      const row = { categories: values[1], updated_at: now() };
+      this.promptPreferences.set(values[0], row);
+      return { rows: [row], rowCount: 1 };
+    }
+
+    if (query.startsWith("SELECT firebase_uid, display_name, photo_url, discoverable")) {
+      const row = this.profiles.get(values[0]);
+      return { rows: row ? [row] : [] };
+    }
+    if (query.startsWith("INSERT INTO public_profiles")) {
+      const row = {
+        firebase_uid: values[0],
+        display_name: values[1],
+        photo_url: values[2],
+        discoverable: values[3],
+        updated_at: now(),
+      };
+      this.profiles.set(values[0], row);
+      return { rows: [row], rowCount: 1 };
+    }
+    if (query.startsWith("SELECT firebase_uid FROM public_profiles")) {
+      const row = this.profiles.get(values[0]);
+      const rows = row?.discoverable ? [{ firebase_uid: values[0] }] : [];
+      return { rows, rowCount: rows.length };
+    }
+    if (query.startsWith("SELECT p.firebase_uid, p.display_name")) {
+      const [uid, search] = values;
+      const needle = String(search).replace(/^%|%$/g, "").toLowerCase();
+      const rows = [...this.profiles.values()]
+        .filter((profile) => profile.firebase_uid !== uid && profile.discoverable && profile.display_name.toLowerCase().includes(needle))
+        .map((profile) => {
+          const follow = [...this.followRequests.values()].find((item) =>
+            (item.follower_uid === uid && item.following_uid === profile.firebase_uid) ||
+            (item.follower_uid === profile.firebase_uid && item.following_uid === uid),
+          );
+          return { ...profile, follow_request_id: follow?.id, follow_status: follow?.status };
+        });
+      return { rows };
+    }
+    if (query.startsWith("SELECT f.id, f.status, f.created_at")) {
+      const incoming = query.includes("f.following_uid = $1");
+      const uid = values[0];
+      const rows = [...this.followRequests.values()]
+        .filter((item) => incoming ? item.following_uid === uid && item.status === "pending" : item.follower_uid === uid)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .map((item) => {
+          const profileUid = incoming ? item.follower_uid : item.following_uid;
+          return { ...item, ...this.profiles.get(profileUid) };
+        });
+      return { rows };
+    }
+    if (query.startsWith("SELECT id, follower_uid, following_uid, status FROM follow_requests")) {
+      const row = [...this.followRequests.values()].find((item) =>
+        (item.follower_uid === values[0] && item.following_uid === values[1]) ||
+        (item.follower_uid === values[1] && item.following_uid === values[0]),
+      );
+      return { rows: row ? [row] : [] };
+    }
+    if (query.startsWith("INSERT INTO follow_requests")) {
+      const row = { id: values[0], follower_uid: values[1], following_uid: values[2], status: "pending", created_at: now(), updated_at: now() };
+      this.followRequests.set(row.id, row);
+      return { rows: [row], rowCount: 1 };
+    }
+    if (query.startsWith("UPDATE follow_requests")) {
+      if (query.includes("WHERE id = $1 AND following_uid = $3")) {
+        const row = this.followRequests.get(values[0]);
+        if (!row || row.following_uid !== values[2] || row.status !== "pending") return { rows: [], rowCount: 0 };
+        row.status = values[1];
+        row.updated_at = now();
+        return { rows: [row], rowCount: 1 };
+      }
+      const row = this.followRequests.get(values[0]);
+      if (!row) return { rows: [], rowCount: 0 };
+      row.status = "pending";
+      row.updated_at = now();
+      return { rows: [row], rowCount: 1 };
+    }
+    if (query.startsWith("DELETE FROM follow_requests")) {
+      const row = [...this.followRequests.values()].find((item) =>
+        (item.status === "accepted" &&
+          ((item.follower_uid === values[0] && item.following_uid === values[1]) ||
+            (item.follower_uid === values[1] && item.following_uid === values[0]))) ||
+        (item.status === "pending" && item.follower_uid === values[0] && item.following_uid === values[1]),
+      );
+      if (!row) return { rowCount: 0 };
+      this.followRequests.delete(row.id);
+      return { rowCount: 1 };
+    }
+    if (query.startsWith("SELECT j.id, j.firebase_uid, j.content, j.created_at")) {
+      const [uid, limit] = values;
+      const rows = [...this.personal]
+        .filter((entry) => this.personalMeta.get(entry.id)?.is_public)
+        .filter((entry) => [...this.followRequests.values()].some((follow) =>
+          follow.status === "accepted" &&
+          ((follow.follower_uid === uid && follow.following_uid === entry.firebase_uid) ||
+            (follow.following_uid === uid && follow.follower_uid === entry.firebase_uid))))
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, limit)
+        .map((entry) => ({
+          ...entry,
+          ...this.personalMeta.get(entry.id),
+          ...this.profiles.get(entry.firebase_uid),
+          entry_date: this.personalMeta.get(entry.id)?.entry_date,
+        }));
+      return { rows };
     }
 
     if (query.startsWith("INSERT INTO diary_rooms")) {
@@ -276,6 +429,8 @@ test("database migration is safe to run repeatedly", async () => {
   assert.equal(statements.length, 2);
   assert.match(statements[0], /CREATE TABLE IF NOT EXISTS diary_rooms/);
   assert.match(statements[0], /UNIQUE \(room_id, firebase_uid, entry_date\)/);
+  assert.match(statements[0], /CREATE TABLE IF NOT EXISTS journal_entry_meta/);
+  assert.match(statements[0], /CREATE TABLE IF NOT EXISTS follow_requests/);
   assert.equal(statements[0], statements[1]);
 });
 
@@ -498,4 +653,134 @@ test("personal entry limit is caller controlled and clamped", async (t) => {
     (await json(await request(base, "friend-token", "/api/entries?limit=1000"))).entries,
     [],
   );
+});
+
+test("personal entries keep mood metadata, calendar dates, and visibility ownership", async (t) => {
+  const { server, base } = await start();
+  t.after(() => server.close());
+
+  const created = await request(base, "owner-token", "/api/entries", {
+    method: "POST",
+    body: JSON.stringify({
+      content: "오늘의 기분",
+      entry_date: "2026-09-01",
+      mood_emoji: "😊",
+      mood_color: "sage",
+      is_public: true,
+    }),
+  });
+  assert.equal(created.status, 201);
+  const entry = (await json(created)).entry;
+  assert.equal(entry.entry_date, "2026-09-01");
+  assert.equal(entry.mood_emoji, "😊");
+  assert.equal(entry.mood_color, "sage");
+  assert.equal(entry.is_public, true);
+
+  const calendar = await json(
+    await request(base, "owner-token", "/api/entries/calendar?from=2026-09-01&to=2026-09-30"),
+  );
+  assert.equal(calendar.entries.length, 1);
+  assert.equal(calendar.entries[0].entry_date, "2026-09-01");
+  assert.equal(
+    (await request(base, "friend-token", "/api/entries/" + entry.id + "/visibility", {
+      method: "PATCH",
+      body: JSON.stringify({ is_public: false }),
+    })).status,
+    404,
+  );
+  assert.equal(
+    (await request(base, "owner-token", "/api/entries", {
+      method: "POST",
+      body: JSON.stringify({ content: "잘못된 기분", mood_emoji: "😈" }),
+    })).status,
+    400,
+  );
+});
+
+test("daily prompts and prompt preferences are authenticated", async (t) => {
+  const { server, base } = await start();
+  t.after(() => server.close());
+
+  const prompt = await json(await request(base, "owner-token", "/api/prompts/today?date=2026-09-04"));
+  assert.equal(prompt.date, "2026-09-04");
+  assert.ok(prompt.prompt.id);
+  assert.ok(prompt.prompt.text);
+
+  const saved = await json(
+    await request(base, "owner-token", "/api/me/prompt-preferences", {
+      method: "PUT",
+      body: JSON.stringify({ categories: ["감정"] }),
+    }),
+  );
+  assert.deepEqual(saved.categories, ["감정"]);
+  const filtered = await json(await request(base, "owner-token", "/api/prompts/today?date=2026-09-04"));
+  assert.equal(filtered.prompt.category, "감정");
+  assert.equal(
+    (await request(base, "owner-token", "/api/me/prompt-preferences", {
+      method: "PUT",
+      body: JSON.stringify({ categories: ["없는 주제"] }),
+    })).status,
+    400,
+  );
+
+  const room = await json(await request(base, "owner-token", "/api/rooms", {
+    method: "POST",
+    body: JSON.stringify({ name: "주제 방" }),
+  }));
+  assert.equal(
+    (await request(base, "owner-token", "/api/diaries/" + room.room.id + "/prompt?date=2026-09-04")).status,
+    200,
+  );
+  assert.equal(
+    (await request(base, "friend-token", "/api/rooms/" + room.room.id + "/prompt?date=2026-09-04")).status,
+    403,
+  );
+});
+
+test("approved friends can see only explicitly public personal entries", async (t) => {
+  const { server, base } = await start();
+  t.after(() => server.close());
+
+  for (const [token, name] of [["owner-token", "오너"], ["friend-token", "친구"], ["other-token", "다른 사람"]]) {
+    assert.equal(
+      (await request(base, token, "/api/me/profile", {
+        method: "PUT",
+        body: JSON.stringify({ display_name: name, discoverable: true }),
+      })).status,
+      200,
+    );
+  }
+
+  const search = await json(await request(base, "owner-token", "/api/users/search?q=친구"));
+  assert.equal(search.users.length, 1);
+  const follow = await json(
+    await request(base, "owner-token", "/api/users/" + search.users[0].uid + "/follow", { method: "POST" }),
+  );
+  assert.equal(follow.follow_request.status, "pending");
+
+  const incoming = await json(await request(base, "friend-token", "/api/me/follow-requests"));
+  assert.equal(incoming.incoming.length, 1);
+  assert.equal(
+    (await request(base, "friend-token", "/api/follow-requests/" + incoming.incoming[0].id + "/accept", {
+      method: "POST",
+    })).status,
+    200,
+  );
+
+  const publicEntry = await json(
+    await request(base, "owner-token", "/api/entries", {
+      method: "POST",
+      body: JSON.stringify({ content: "친구에게 공개", is_public: true }),
+    }),
+  );
+  await request(base, "owner-token", "/api/entries", {
+    method: "POST",
+    body: JSON.stringify({ content: "나만 볼 기록", is_public: false }),
+  });
+
+  const feed = await json(await request(base, "friend-token", "/api/feed"));
+  assert.equal(feed.entries.length, 1);
+  assert.equal(feed.entries[0].id, publicEntry.entry.id);
+  assert.equal(feed.entries[0].author.display_name, "오너");
+  assert.deepEqual((await json(await request(base, "other-token", "/api/feed"))).entries, []);
 });

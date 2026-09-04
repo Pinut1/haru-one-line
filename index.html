@@ -60,6 +60,7 @@
         <nav class="mode-nav" aria-label="기록 종류">
           <button type="button" class="mode-button active" data-view="personal" aria-current="page">내 기록</button>
           <button type="button" class="mode-button" data-view="shared">공유 일기</button>
+          <button type="button" class="mode-button" data-view="feed">친구 피드</button>
         </nav>
 
         <section id="personalPanel" class="panel" aria-labelledby="personalTitle">
@@ -67,8 +68,49 @@
           <form id="journalForm" class="write-card">
             <label for="journalInput">오늘의 한 줄<span class="label-hint">Shift + Enter 로 줄바꿈, Enter 로 기록</span></label>
             <div class="form-row"><textarea id="journalInput" maxlength="60" rows="1" autocomplete="off" placeholder="오늘 기억하고 싶은 한 순간은?" required></textarea><button type="submit">기록하기</button></div>
+            <div class="entry-options">
+              <label for="moodEmoji">오늘 기분 <span class="label-hint">선택</span></label>
+              <select id="moodEmoji" aria-label="오늘 기분 이모지">
+                <option value="">기분을 골라 보세요</option>
+                <option value="😊">😊 편안해요</option>
+                <option value="😌">😌 여유로워요</option>
+                <option value="🥰">🥰 다정해요</option>
+                <option value="😐">😐 담담해요</option>
+                <option value="😔">😔 조금 가라앉아요</option>
+                <option value="😤">😤 답답해요</option>
+                <option value="😴">😴 지쳤어요</option>
+                <option value="🤩">🤩 신나요</option>
+              </select>
+              <label for="moodColor">색깔 <span class="label-hint">선택</span></label>
+              <select id="moodColor" aria-label="오늘 기분 색깔">
+                <option value="">색깔을 골라 보세요</option>
+                <option value="sage">세이지</option>
+                <option value="blue">파랑</option>
+                <option value="yellow">노랑</option>
+                <option value="orange">주황</option>
+                <option value="rose">장미</option>
+                <option value="lavender">라벤더</option>
+              </select>
+              <label class="public-option"><input id="personalPublic" type="checkbox"> 친구에게 공개</label>
+            </div>
             <p><span id="todayLabel"></span><span><b id="charCount">0</b> / 60</span></p>
           </form>
+          <div id="personalPrompt" class="prompt-card" hidden>
+            <span>오늘의 질문 · <b id="personalPromptCategory"></b></span>
+            <strong id="personalPromptText"></strong>
+          </div>
+          <section class="calendar-panel" aria-labelledby="calendarTitle">
+            <div class="archive-title"><h3 id="calendarTitle">나의 기록 리듬</h3><span id="calendarSummary"></span></div>
+            <p class="calendar-copy">기록한 날마다 색이 채워져요. 칸을 누르면 그날의 기록을 볼 수 있어요.</p>
+            <div class="calendar" role="group" aria-label="최근 1년 기록 캘린더">
+              <div class="calendar-months" id="calendarMonths" aria-hidden="true"></div>
+              <div class="calendar-body">
+                <div class="calendar-weekdays" aria-hidden="true"><span>일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span>토</span></div>
+                <div id="calendarGrid" class="calendar-grid" role="grid"></div>
+              </div>
+            </div>
+            <div class="calendar-legend"><span>적음</span><i class="level-0"></i><i class="level-1"></i><i class="level-2"></i><i class="level-3"></i><span>많음</span></div>
+          </section>
           <div class="archive-title"><h3>나의 기록</h3><span id="entryCount"></span></div>
           <div class="archive-filter">
             <label for="entryDateFilter">날짜로 모아보기</label>
@@ -83,6 +125,18 @@
             <div><p class="eyebrow"><i aria-hidden="true"></i> TWO PEOPLE, ONE DIARY</p><h3 id="sharedTitle">함께 쓰는 일기</h3></div>
             <button id="createRoomButton" class="primary-button" type="button">새 다이어리 만들기</button>
           </div>
+          <details class="prompt-settings" id="promptSettings">
+            <summary>오늘의 주제 취향 설정</summary>
+            <p>선택한 카테고리에서 내장 주제를 골라 드려요. 아무것도 고르지 않으면 모든 주제를 사용해요.</p>
+            <div class="prompt-category-list">
+              <label><input type="checkbox" value="일상"> 일상</label>
+              <label><input type="checkbox" value="감정"> 감정</label>
+              <label><input type="checkbox" value="추억"> 추억</label>
+              <label><input type="checkbox" value="미래"> 미래</label>
+              <label><input type="checkbox" value="서로에게"> 서로에게</label>
+            </div>
+            <button id="savePromptPreferences" class="text-button" type="button">주제 설정 저장</button>
+          </details>
           <p id="sharedStatus" class="inline-status" role="status" aria-live="polite"></p>
           <form id="joinForm" class="join-card">
             <label for="inviteInput">초대 링크로 참여하기</label>
@@ -96,6 +150,10 @@
             <div class="room-detail-top">
               <div><button id="backToRooms" class="text-button" type="button">← 다이어리 목록</button><h3 id="roomTitle"></h3><p id="roomMeta"></p></div>
               <button id="leaveRoomButton" class="text-button danger" type="button" hidden>이 다이어리 나가기</button>
+            </div>
+            <div id="roomPrompt" class="prompt-card" hidden>
+              <span>오늘의 교환 질문 · <b id="roomPromptCategory"></b></span>
+              <strong id="roomPromptText"></strong>
             </div>
             <div id="invitePanel" class="invite-panel" hidden>
               <div><strong>친구를 초대해 보세요</strong><small>링크는 소유자만 새로 만들거나 취소할 수 있어요.</small></div>
@@ -111,6 +169,39 @@
             <div class="archive-title"><h3>우리의 기록</h3><span id="sharedEntryCount"></span></div>
             <div id="sharedEntries" class="entries" aria-live="polite"></div>
           </section>
+        </section>
+
+        <section id="feedPanel" class="panel" hidden aria-labelledby="feedTitle">
+          <div class="shared-heading">
+            <div><p class="eyebrow"><i aria-hidden="true"></i> FRIENDS, ONE DAY AT A TIME</p><h3 id="feedTitle">친구 피드</h3></div>
+          </div>
+          <p id="feedStatus" class="inline-status" role="status" aria-live="polite"></p>
+          <div class="social-grid">
+            <section class="social-card" aria-labelledby="profileSettingsTitle">
+              <h4 id="profileSettingsTitle">내 공개 프로필</h4>
+              <form id="profileForm">
+                <label for="profileDisplayName">친구에게 보일 이름</label>
+                <input id="profileDisplayName" maxlength="40" required>
+                <label class="public-option"><input id="profileDiscoverable" type="checkbox" checked> 친구 검색에 내 프로필 보이기</label>
+                <button class="primary-button" type="submit">프로필 저장</button>
+              </form>
+            </section>
+            <section class="social-card" aria-labelledby="friendSearchTitle">
+              <h4 id="friendSearchTitle">친구 찾기</h4>
+              <form id="userSearchForm" class="search-row">
+                <label class="sr-only" for="userSearchInput">닉네임 검색</label>
+                <input id="userSearchInput" maxlength="40" placeholder="닉네임으로 검색">
+                <button class="primary-button" type="submit">검색</button>
+              </form>
+              <div id="userSearchResults" class="social-list" aria-live="polite"></div>
+            </section>
+          </div>
+          <section class="social-card request-card" aria-labelledby="requestTitle">
+            <h4 id="requestTitle">친구 요청</h4>
+            <div id="incomingRequests" class="social-list"></div>
+          </section>
+          <div class="archive-title"><h3>친구들의 공개 기록</h3><button id="refreshFeedButton" class="text-button" type="button">새로고침</button></div>
+          <div id="feedEntries" class="entries" aria-live="polite"></div>
         </section>
       </section>
     </main>
