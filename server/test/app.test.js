@@ -47,11 +47,12 @@ class MemoryPool {
     if (query === "SELECT 1") return { rows: [{ "?column?": 1 }] };
 
     if (query.startsWith("SELECT id, content, created_at FROM journal_entries")) {
+      const limit = Number.isInteger(values[1]) ? values[1] : 100;
       return {
         rows: this.personal
           .filter((entry) => entry.firebase_uid === values[0])
           .sort((a, b) => b.created_at.localeCompare(a.created_at))
-          .slice(0, 100),
+          .slice(0, limit),
       };
     }
     if (query.startsWith("INSERT INTO journal_entries")) {
@@ -396,4 +397,105 @@ test("member can leave and releases the second room slot", async (t) => {
   assert.equal((await request(base, "friend-token", `/api/rooms/${roomId}`)).status, 403);
   assert.equal((await json(await request(base, "owner-token", `/api/rooms/${roomId}`))).room.member_count, 1);
   assert.equal((await request(base, "other-token", "/api/rooms/join", { method: "POST", body: JSON.stringify({ invite: `${roomId}.${invite}` }) })).status, 201);
+});
+
+test("line breaks survive a round trip and are normalised", async (t) => {
+  const { server, base } = await start();
+  t.after(() => server.close());
+
+  // CRLF collapses to LF so the same text typed on Windows and macOS is
+  // stored identically.
+  const created = await json(
+    await request(base, "owner-token", "/api/entries", {
+      method: "POST",
+      body: JSON.stringify({ content: "첫 줄\u000d\n둘째 줄" }),
+    }),
+  );
+  assert.equal(created.entry.content, "첫 줄\n둘째 줄");
+
+  // Leading/trailing blank lines are trimmed and long runs collapse to one
+  // blank line, but interior breaks are preserved.
+  const padded = await json(
+    await request(base, "owner-token", "/api/entries", {
+      method: "POST",
+      body: JSON.stringify({ content: "\n\n위\n\n\n\n아래\n\n" }),
+    }),
+  );
+  assert.equal(padded.entry.content, "위\n\n아래");
+
+  // Other control characters are stripped rather than stored.
+  const controls = await json(
+    await request(base, "owner-token", "/api/entries", {
+      method: "POST",
+      body: JSON.stringify({ content: "탭\t문자\u0000" }),
+    }),
+  );
+  assert.equal(controls.entry.content, "탭문자");
+
+  // A newline counts toward the 60 character budget.
+  const tooLong = await request(base, "owner-token", "/api/entries", {
+    method: "POST",
+    body: JSON.stringify({ content: `${"가".repeat(60)}\n나` }),
+  });
+  assert.equal(tooLong.status, 400);
+
+  // Whitespace-only content is still rejected.
+  assert.equal(
+    (await request(base, "owner-token", "/api/entries", {
+      method: "POST",
+      body: JSON.stringify({ content: "\n\n   \n" }),
+    })).status,
+    400,
+  );
+
+  // Shared entries go through the same validator.
+  const room = await json(
+    await request(base, "owner-token", "/api/rooms", {
+      method: "POST",
+      body: JSON.stringify({ name: "줄바꿈 방" }),
+    }),
+  );
+  const shared = await json(
+    await request(base, "owner-token", `/api/rooms/${room.room.id}/entries`, {
+      method: "POST",
+      body: JSON.stringify({ content: "공유\u000d\n줄바꿈", date: "2026-09-04" }),
+    }),
+  );
+  assert.equal(shared.entry.content, "공유\n줄바꿈");
+});
+
+test("personal entry limit is caller controlled and clamped", async (t) => {
+  const { server, base } = await start();
+  t.after(() => server.close());
+
+  for (let index = 0; index < 12; index += 1) {
+    await request(base, "owner-token", "/api/entries", {
+      method: "POST",
+      body: JSON.stringify({ content: `기록 ${index}` }),
+    });
+  }
+
+  const limited = await json(
+    await request(base, "owner-token", "/api/entries?limit=5"),
+  );
+  assert.equal(limited.entries.length, 5);
+
+  // The default stays at 100 and the archive can ask for a wider window.
+  const wide = await json(
+    await request(base, "owner-token", "/api/entries?limit=1000"),
+  );
+  assert.equal(wide.entries.length, 12);
+
+  // Junk and out-of-range values fall back instead of failing.
+  for (const query of ["", "?limit=abc", "?limit=0", "?limit=-3", "?limit=1.5"]) {
+    const response = await request(base, "owner-token", `/api/entries${query}`);
+    assert.equal(response.status, 200);
+    assert.equal((await json(response)).entries.length, 12);
+  }
+
+  // Still scoped to the caller.
+  assert.deepEqual(
+    (await json(await request(base, "friend-token", "/api/entries?limit=1000"))).entries,
+    [],
+  );
 });

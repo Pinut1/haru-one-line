@@ -20,6 +20,8 @@ let activeRoom = null;
 let editingEntryId = null;
 let currentInviteToken = null;
 let currentInviteRoomId = null;
+let personalEntries = [];
+let personalDateFilter = "";
 let pendingInvite = readInviteFromUrl();
 
 function validConfig(config) {
@@ -151,10 +153,34 @@ function getLocalEntries() {
   }
 }
 
-function localDate() {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, "0");
+function localDate(value) {
+  const now = value ? new Date(value) : new Date();
+  if (Number.isNaN(now.valueOf())) return "";
+  const pad = (part) => String(part).padStart(2, "0");
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+// Entries are stored as TIMESTAMPTZ, so the calendar day has to be derived in
+// the reader's own timezone. Grouping on the server's UTC date would push a
+// KST evening record onto the following day.
+function entryLocalDate(entry) {
+  if (!entry) return "";
+  if (entry.created_at) {
+    const createdDate = localDate(entry.created_at);
+    if (createdDate) return createdDate;
+  }
+  if (typeof entry.date === "string" && /^\d{4}-\d{2}-\d{2}/.test(entry.date)) {
+    return entry.date.slice(0, 10);
+  }
+  if (typeof entry.date === "string") {
+    const legacy = entry.date.match(/^(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일/);
+    if (legacy) {
+      const candidate = `${legacy[1]}-${String(legacy[2]).padStart(2, "0")}-${String(legacy[3]).padStart(2, "0")}`;
+      const parsed = new Date(`${candidate}T00:00:00`);
+      if (!Number.isNaN(parsed.valueOf()) && localDate(parsed) === candidate) return candidate;
+    }
+  }
+  return "";
 }
 
 function dateText(value) {
@@ -222,51 +248,92 @@ function setView(view) {
   }
 }
 
+function buildEntryCard(entry) {
+  const article = document.createElement("article");
+  article.className = "entry";
+  const paragraph = document.createElement("p");
+  // textContent keeps the raw line breaks; `white-space: pre-wrap` in the
+  // stylesheet is what makes them visible.
+  paragraph.textContent = entry.content ?? entry.text ?? "";
+  if ((entry.content ?? entry.text ?? "").includes("\n")) {
+    paragraph.classList.add("multiline");
+  }
+  const footer = document.createElement("div");
+  const date = document.createElement("small");
+  date.textContent = shortDateText(entryLocalDate(entry)) || entry.date || "오늘";
+  const actions = document.createElement("div");
+  actions.className = "entry-actions";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.dataset.deletePersonal = entry.id;
+  remove.setAttribute("aria-label", "기록 삭제");
+  remove.textContent = "삭제";
+  actions.append(remove);
+  footer.append(date, actions);
+  article.append(paragraph, footer);
+  return article;
+}
+
+function groupEntriesByDate(entries) {
+  const groups = new Map();
+  for (const entry of entries) {
+    const key = entryLocalDate(entry) || "unknown";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  }
+  return [...groups.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+}
+
 function drawPersonalEntries(entries) {
   const list = $("#entries");
-  $("#entryCount").textContent = `${entries.length}개의 순간`;
+  const filtered = personalDateFilter
+    ? entries.filter((entry) => entryLocalDate(entry) === personalDateFilter)
+    : entries;
+
+  $("#entryCount").textContent = personalDateFilter
+    ? `${shortDateText(personalDateFilter)} · ${filtered.length}개의 순간`
+    : `${filtered.length}개의 순간`;
+  $("#entryDateClear").hidden = !personalDateFilter;
+
   list.replaceChildren();
-  if (!entries.length) {
+  if (!filtered.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.innerHTML = "아직 기록이 없어요.<br>오늘의 첫 문장을 남겨 보세요.";
+    empty.innerHTML = personalDateFilter
+      ? "이 날의 기록이 없어요.<br>다른 날짜를 골라 보세요."
+      : "아직 기록이 없어요.<br>오늘의 첫 문장을 남겨 보세요.";
     list.append(empty);
     return;
   }
 
-  for (const entry of entries) {
-    const article = document.createElement("article");
-    article.className = "entry";
-    const paragraph = document.createElement("p");
-    paragraph.textContent = entry.content ?? entry.text ?? "";
-    const footer = document.createElement("div");
-    const date = document.createElement("small");
-    date.textContent = dateText(entry.created_at) || entry.date || "오늘";
-    const actions = document.createElement("div");
-    actions.className = "entry-actions";
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.dataset.deletePersonal = entry.id;
-    remove.setAttribute("aria-label", "기록 삭제");
-    remove.textContent = "삭제";
-    actions.append(remove);
-    footer.append(date, actions);
-    article.append(paragraph, footer);
-    list.append(article);
+  for (const [date, group] of groupEntriesByDate(filtered)) {
+    const heading = document.createElement("h4");
+    heading.className = "entry-day";
+    const label = document.createElement("span");
+    label.textContent = date === "unknown" ? "날짜 미상" : shortDateText(date);
+    const count = document.createElement("small");
+    count.textContent = `${group.length}개`;
+    heading.append(label, count);
+    list.append(heading);
+    for (const entry of group) list.append(buildEntryCard(entry));
   }
 }
 
 async function renderPersonalEntries() {
   if (!currentUser) return;
   if (currentUser.isPreview) {
-    drawPersonalEntries(getLocalEntries());
+    personalEntries = getLocalEntries();
+    drawPersonalEntries(personalEntries);
     return;
   }
 
   $("#entries").innerHTML = '<p class="empty">기록을 불러오는 중…</p>';
   try {
-    const body = await apiRequest("/api/entries");
-    drawPersonalEntries(body.entries || []);
+    // The archive groups by day, so pull a wide window rather than the
+    // server's default page of 100.
+    const body = await apiRequest("/api/entries?limit=1000");
+    personalEntries = body.entries || [];
+    drawPersonalEntries(personalEntries);
   } catch (error) {
     console.error(error);
     $("#entryCount").textContent = "연결 확인 필요";
@@ -443,6 +510,9 @@ function drawRoomEntries(entries) {
     author.textContent = entry.firebase_uid === currentUser?.uid ? "나" : "친구";
     const paragraph = document.createElement("p");
     paragraph.textContent = entry.content;
+    if ((entry.content || "").includes("\n")) {
+      paragraph.classList.add("multiline");
+    }
     const bottom = document.createElement("div");
     const date = document.createElement("small");
     date.className = "shared-entry-date";
@@ -476,6 +546,7 @@ async function refreshActiveRoom() {
 function resetEditor() {
   editingEntryId = null;
   $("#sharedInput").value = "";
+  $("#sharedInput").style.height = "auto";
   $("#sharedCharCount").textContent = "0";
   $("#sharedEntryHint").textContent = "한 날짜에 멤버별 한 줄씩 기록할 수 있어요.";
   $("#cancelEditButton").hidden = true;
@@ -526,7 +597,8 @@ async function submitRoom(event) {
 async function submitJoin(event) {
   event.preventDefault();
   if (!currentUser || currentUser.isPreview) return;
-  const button = event.submitter;
+  const button =
+    event.submitter || event.currentTarget.querySelector("button[type='submit']");
   const invite = $("#inviteInput").value.trim();
   if (!invite) {
     setSharedStatus("초대 링크 또는 토큰을 입력해 주세요.", true);
@@ -601,7 +673,8 @@ async function submitSharedEntry(event) {
   const content = $("#sharedInput").value.trim();
   const date = $("#sharedDate").value;
   if (!content || !date) return;
-  const button = event.submitter;
+  const button =
+    event.submitter || event.currentTarget.querySelector("button[type='submit']");
   button.disabled = true;
   const wasEditing = Boolean(editingEntryId);
   try {
@@ -685,6 +758,25 @@ function escapeHtml(text) {
   return element.innerHTML;
 }
 
+// A textarea grows with its content so the line breaks being typed stay
+// visible while writing.
+function autoGrow(element) {
+  element.style.height = "auto";
+  element.style.height = `${element.scrollHeight}px`;
+}
+
+// Enter submits, Shift+Enter inserts a line break. `isComposing` guards the
+// Enter that only confirms a Hangul composition — submitting there would eat
+// the last syllable.
+function submitOnEnter(form) {
+  return (event) => {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    if (event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    form.requestSubmit();
+  };
+}
+
 $("#googleLogin").addEventListener("click", googleLogin);
 $("#previewButton").addEventListener("click", preview);
 $("#logoutButton").addEventListener("click", async () => {
@@ -693,9 +785,25 @@ $("#logoutButton").addEventListener("click", async () => {
 });
 $("#journalInput").addEventListener("input", (event) => {
   $("#charCount").textContent = event.target.value.length;
+  autoGrow(event.target);
 });
+$("#journalInput").addEventListener("keydown", submitOnEnter($("#journalForm")));
 $("#sharedInput").addEventListener("input", (event) => {
   $("#sharedCharCount").textContent = event.target.value.length;
+  autoGrow(event.target);
+});
+$("#sharedInput").addEventListener(
+  "keydown",
+  submitOnEnter($("#sharedEntryForm")),
+);
+$("#entryDateFilter").addEventListener("change", (event) => {
+  personalDateFilter = event.target.value || "";
+  drawPersonalEntries(personalEntries);
+});
+$("#entryDateClear").addEventListener("click", () => {
+  personalDateFilter = "";
+  $("#entryDateFilter").value = "";
+  drawPersonalEntries(personalEntries);
 });
 $("#sharedDate").value = localDate();
 $("#todayLabel").textContent = new Intl.DateTimeFormat("ko-KR", {
@@ -709,12 +817,19 @@ $("#journalForm").addEventListener("submit", async (event) => {
   const input = $("#journalInput");
   const content = input.value.trim();
   if (!content) return;
-  const button = event.submitter;
+  const button =
+    event.submitter || event.currentTarget.querySelector("button[type='submit']");
   button.disabled = true;
   try {
     if (currentUser?.isPreview) {
       const entries = getLocalEntries();
-      entries.unshift({ id: crypto.randomUUID(), text: content, date: dateText(localDate()) });
+      // Store a machine-readable timestamp so the archive can group by day.
+      entries.unshift({
+        id: crypto.randomUUID(),
+        text: content,
+        created_at: new Date().toISOString(),
+        date: localDate(),
+      });
       localStorage.setItem(dataKey(), JSON.stringify(entries));
     } else {
       await apiRequest("/api/entries", {
@@ -723,6 +838,7 @@ $("#journalForm").addEventListener("submit", async (event) => {
       });
     }
     input.value = "";
+    input.style.height = "auto";
     $("#charCount").textContent = "0";
     await renderPersonalEntries();
   } catch (error) {

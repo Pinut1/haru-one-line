@@ -65,11 +65,16 @@
         <section id="personalPanel" class="panel" aria-labelledby="personalTitle">
           <h3 id="personalTitle" class="sr-only">내 기록</h3>
           <form id="journalForm" class="write-card">
-            <label for="journalInput">오늘의 한 줄</label>
-            <div class="form-row"><input id="journalInput" maxlength="60" autocomplete="off" placeholder="오늘 기억하고 싶은 한 순간은?" required><button type="submit">기록하기</button></div>
+            <label for="journalInput">오늘의 한 줄<span class="label-hint">Shift + Enter 로 줄바꿈, Enter 로 기록</span></label>
+            <div class="form-row"><textarea id="journalInput" maxlength="60" rows="1" autocomplete="off" placeholder="오늘 기억하고 싶은 한 순간은?" required></textarea><button type="submit">기록하기</button></div>
             <p><span id="todayLabel"></span><span><b id="charCount">0</b> / 60</span></p>
           </form>
           <div class="archive-title"><h3>나의 기록</h3><span id="entryCount"></span></div>
+          <div class="archive-filter">
+            <label for="entryDateFilter">날짜로 모아보기</label>
+            <input id="entryDateFilter" type="date">
+            <button id="entryDateClear" class="text-button" type="button" hidden>전체 보기</button>
+          </div>
           <div id="entries" class="entries" aria-live="polite"></div>
         </section>
 
@@ -99,7 +104,7 @@
             </div>
             <form id="sharedEntryForm" class="write-card shared-write-card">
               <label for="sharedDate">오늘의 한 줄 <span class="label-hint">날짜를 골라 지난 기록도 남길 수 있어요.</span></label>
-              <div class="form-row shared-form-row"><input id="sharedDate" type="date" required><input id="sharedInput" maxlength="60" autocomplete="off" placeholder="우리만의 오늘을 남겨 보세요" required><button type="submit">기록하기</button></div>
+              <div class="form-row shared-form-row"><input id="sharedDate" type="date" required><textarea id="sharedInput" maxlength="60" rows="1" autocomplete="off" placeholder="우리만의 오늘을 남겨 보세요" required></textarea><button type="submit">기록하기</button></div>
               <p><span id="sharedEntryHint">한 날짜에 멤버별 한 줄씩 기록할 수 있어요.</span><span><b id="sharedCharCount">0</b> / 60</span></p>
               <button id="cancelEditButton" class="text-button cancel-edit" type="button" hidden>수정 취소</button>
             </form>

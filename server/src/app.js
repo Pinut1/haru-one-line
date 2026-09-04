@@ -70,11 +70,27 @@ function readContent(value) {
     throw new HttpError(400, "기록은 1~60자로 입력해 주세요.", "invalid_content");
   }
 
-  const content = value.trim();
+  // Line breaks are part of the record. Normalise CRLF/CR to LF so the same
+  // text typed on Windows and macOS is stored identically, and drop other
+  // control characters that would only corrupt rendering.
+  const content = value
+    .replace(/\u000d\u000a?/g, "\n")
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/^\n+|\n+$/g, "")
+    .trim();
+
   if (!content || characterLength(content) > 60) {
     throw new HttpError(400, "기록은 1~60자로 입력해 주세요.", "invalid_content");
   }
   return content;
+}
+
+function readLimit(value, fallback, max) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
 }
 
 function readDate(body = {}) {
@@ -276,9 +292,12 @@ export function createApp({ pool, verifyToken }) {
   // shared rooms so a personal entry can never be exposed through a room.
   app.get("/api/entries", requireAuth, async (req, res, next) => {
     try {
+      // The archive groups entries by day on the client, so the list has to be
+      // able to reach past the newest 100 records. The uid condition stays.
+      const limit = readLimit(req.query.limit, 100, 1000);
       const result = await pool.query(
-        "SELECT id, content, created_at FROM journal_entries WHERE firebase_uid = $1 ORDER BY created_at DESC LIMIT 100",
-        [req.user.uid],
+        "SELECT id, content, created_at FROM journal_entries WHERE firebase_uid = $1 ORDER BY created_at DESC LIMIT $2",
+        [req.user.uid, limit],
       );
       res.json({ entries: result.rows });
     } catch (error) {
@@ -639,8 +658,7 @@ export function createApp({ pool, verifyToken }) {
     try {
       const roomId = readRoomId(req.params.roomId);
       await requireMembership(pool, roomId, req.user.uid);
-      const rawLimit = Number(req.query.limit ?? 365);
-      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 365) : 365;
+      const limit = readLimit(req.query.limit, 365, 365);
       const result = await pool.query(
         `SELECT id, room_id, firebase_uid, entry_date, content, created_at, updated_at
            FROM shared_diary_entries
