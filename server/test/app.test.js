@@ -262,6 +262,7 @@ class MemoryPool {
     }
     if (query.includes("FROM ( SELECT e.*, ROW_NUMBER() OVER")) {
       const roomIds = values[0];
+      const callerUid = values[1];
       const rows = [...this.entries.values()]
         .filter((entry) => roomIds.includes(entry.room_id))
         .sort((a, b) => `${b.entry_date}${b.updated_at}`.localeCompare(`${a.entry_date}${a.updated_at}`));
@@ -269,7 +270,15 @@ class MemoryPool {
       for (const roomId of roomIds) {
         result.push(...rows.filter((entry) => entry.room_id === roomId).slice(0, 6));
       }
-      return { rows: result };
+      return {
+        rows: result.map((entry) => ({
+          ...entry,
+          caller_has_entry: [...this.entries.values()].some((candidate) =>
+            candidate.room_id === entry.room_id &&
+            candidate.entry_date === entry.entry_date &&
+            candidate.firebase_uid === callerUid),
+        })),
+      };
     }
 
     if (query.startsWith("SELECT id, name, owner_uid, created_at FROM diary_rooms")) {
@@ -287,14 +296,22 @@ class MemoryPool {
           .sort((a, b) => a.member_slot - b.member_slot),
       };
     }
-    if (query.startsWith("SELECT id, room_id, firebase_uid, entry_date, content, created_at, updated_at FROM shared_diary_entries")) {
+    if (query.startsWith("SELECT id, room_id, firebase_uid, entry_date, content, created_at, updated_at")) {
       const roomId = values[0];
-      const limit = values[1] || 365;
+      const limit = Number.isInteger(values[1]) ? values[1] : 365;
+      const callerUid = Number.isInteger(values[1]) ? values[2] : values[1];
       return {
         rows: [...this.entries.values()]
           .filter((entry) => entry.room_id === roomId)
           .sort((a, b) => `${b.entry_date}${b.updated_at}`.localeCompare(`${a.entry_date}${a.updated_at}`))
-          .slice(0, limit),
+          .slice(0, limit)
+          .map((entry) => ({
+            ...entry,
+            caller_has_entry: [...this.entries.values()].some((candidate) =>
+              candidate.room_id === entry.room_id &&
+              candidate.entry_date === entry.entry_date &&
+              candidate.firebase_uid === callerUid),
+          })),
       };
     }
 
@@ -539,6 +556,72 @@ test("daily uniqueness, own-entry update/delete, member visibility, and validati
   assert.equal((await request(base, "owner-token", `/api/rooms/${roomId}/entries`, { method: "POST", body: JSON.stringify({ content: "a".repeat(61), date }) })).status, 400);
   assert.equal((await request(base, "owner-token", `/api/rooms/${roomId}/entries`, { method: "POST", body: JSON.stringify({ content: "날짜 오류", date: "2026-02-30" }) })).status, 400);
   assert.equal((await request(base, "owner-token", `/api/rooms/${roomId}/entries/not-an-entry`, { method: "DELETE" })).status, 400);
+});
+
+test("shared entries stay locked on every read surface until the caller writes that date", async (t) => {
+  const { server, base } = await start();
+  t.after(() => server.close());
+
+  const created = await json(await request(base, "owner-token", "/api/rooms", {
+    method: "POST",
+    body: JSON.stringify({ name: "교환 일기" }),
+  }));
+  const roomId = created.room.id;
+  await request(base, "friend-token", "/api/rooms/join", {
+    method: "POST",
+    body: JSON.stringify({ invite: `${roomId}.${created.invite.token}` }),
+  });
+  const date = "2026-09-04";
+  await request(base, "friend-token", `/api/rooms/${roomId}/entries`, {
+    method: "POST",
+    body: JSON.stringify({ content: "친구만 먼저 쓴 내용", date }),
+  });
+
+  const summaryPaths = ["/api/rooms", "/api/diaries"];
+  const detailPaths = [`/api/rooms/${roomId}`, `/api/diaries/${roomId}`];
+  const entryPaths = [
+    `/api/rooms/${roomId}/entries`,
+    `/api/rooms/${roomId}/history`,
+    `/api/diaries/${roomId}/entries`,
+    `/api/diaries/${roomId}/history`,
+  ];
+
+  async function assertVisibility(path, expectedContent, expectedLocked) {
+    const response = await request(base, "owner-token", path);
+    assert.equal(response.status, 200, path);
+    const body = await json(response);
+    const entries = body.rooms?.[0]?.recent_entries || body.room?.recent_entries || body.entries;
+    assert.equal(entries.length, 1, path);
+    assert.equal(entries[0].content, expectedContent, path);
+    assert.equal(entries[0].is_locked, expectedLocked, path);
+    assert.equal(entries[0].firebase_uid, friendId, path);
+    assert.equal(entries[0].entry_date, date, path);
+  }
+
+  for (const path of [...summaryPaths, ...detailPaths, ...entryPaths]) {
+    await assertVisibility(path, null, true);
+  }
+
+  const ownView = await json(await request(base, "friend-token", `/api/rooms/${roomId}/entries`));
+  assert.equal(ownView.entries[0].content, "친구만 먼저 쓴 내용");
+  assert.equal(ownView.entries[0].is_locked, false);
+
+  await request(base, "owner-token", `/api/rooms/${roomId}/entries`, {
+    method: "POST",
+    body: JSON.stringify({ content: "나도 쓴 내용", date }),
+  });
+
+  for (const path of [...summaryPaths, ...detailPaths, ...entryPaths]) {
+    const response = await request(base, "owner-token", path);
+    assert.equal(response.status, 200, path);
+    const body = await json(response);
+    const entries = body.rooms?.[0]?.recent_entries || body.room?.recent_entries || body.entries;
+    assert.equal(entries.length, 2, path);
+    for (const entry of entries) {
+      assert.equal(entry.is_locked, false, `${path} ${entry.firebase_uid}`);
+      assert.equal(typeof entry.content, "string", `${path} ${entry.firebase_uid}`);
+    }
+  }
 });
 
 test("member can leave and releases the second room slot", async (t) => {

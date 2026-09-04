@@ -264,6 +264,16 @@ function entryJson(row) {
   };
 }
 
+function sharedEntryJson(row, callerUid) {
+  const entry = entryJson(row);
+  const isLocked = row.firebase_uid !== callerUid && !row.caller_has_entry;
+  return {
+    ...entry,
+    content: isLocked ? null : entry.content,
+    is_locked: isLocked,
+  };
+}
+
 function profileJson(row) {
   if (!row) return null;
   return {
@@ -829,7 +839,13 @@ export function createApp({ pool, verifyToken }) {
 
       if (rooms.length) {
         const recentResult = await pool.query(
-          `SELECT id, room_id, firebase_uid, entry_date, content, created_at, updated_at
+          `SELECT id, room_id, firebase_uid, entry_date, content, created_at, updated_at,
+                  EXISTS (
+                    SELECT 1 FROM shared_diary_entries caller_entry
+                     WHERE caller_entry.room_id = recent.room_id
+                       AND caller_entry.entry_date = recent.entry_date
+                       AND caller_entry.firebase_uid = $2
+                  ) AS caller_has_entry
              FROM (
                SELECT e.*, ROW_NUMBER() OVER (
                  PARTITION BY e.room_id
@@ -840,11 +856,11 @@ export function createApp({ pool, verifyToken }) {
              ) recent
             WHERE row_number <= 6
             ORDER BY entry_date DESC, updated_at DESC`,
-          [rooms.map((room) => room.id)],
+          [rooms.map((room) => room.id), req.user.uid],
         );
         const byRoom = new Map(rooms.map((room) => [room.id, []]));
         for (const row of recentResult.rows) {
-          byRoom.get(row.room_id)?.push(entryJson(row));
+          byRoom.get(row.room_id)?.push(sharedEntryJson(row, req.user.uid));
         }
         for (const room of rooms) room.recent_entries = byRoom.get(room.id) || [];
       }
@@ -932,19 +948,25 @@ export function createApp({ pool, verifyToken }) {
           [roomId],
         ),
         pool.query(
-          `SELECT id, room_id, firebase_uid, entry_date, content, created_at, updated_at
+          `SELECT id, room_id, firebase_uid, entry_date, content, created_at, updated_at,
+                  EXISTS (
+                    SELECT 1 FROM shared_diary_entries caller_entry
+                     WHERE caller_entry.room_id = shared_diary_entries.room_id
+                       AND caller_entry.entry_date = shared_diary_entries.entry_date
+                       AND caller_entry.firebase_uid = $2
+                  ) AS caller_has_entry
              FROM shared_diary_entries
             WHERE room_id = $1
             ORDER BY entry_date DESC, updated_at DESC
             LIMIT 365`,
-          [roomId],
+          [roomId, req.user.uid],
         ),
       ]);
 
       const row = roomResult.rows[0];
       const room = roomJson(
         { ...row, role: membership.role, member_count: membersResult.rows.length },
-        { recent_entries: entriesResult.rows.slice(0, 6).map(entryJson) },
+        { recent_entries: entriesResult.rows.slice(0, 6).map((entry) => sharedEntryJson(entry, req.user.uid)) },
       );
       res.json({
         room,
@@ -955,7 +977,7 @@ export function createApp({ pool, verifyToken }) {
           member_slot: member.member_slot,
           joined_at: member.joined_at,
         })),
-        entries: entriesResult.rows.map(entryJson),
+        entries: entriesResult.rows.map((entry) => sharedEntryJson(entry, req.user.uid)),
       });
     } catch (error) {
       next(error);
@@ -1137,14 +1159,20 @@ export function createApp({ pool, verifyToken }) {
       await requireMembership(pool, roomId, req.user.uid);
       const limit = readLimit(req.query.limit, 365, 365);
       const result = await pool.query(
-        `SELECT id, room_id, firebase_uid, entry_date, content, created_at, updated_at
+        `SELECT id, room_id, firebase_uid, entry_date, content, created_at, updated_at,
+                EXISTS (
+                  SELECT 1 FROM shared_diary_entries caller_entry
+                   WHERE caller_entry.room_id = shared_diary_entries.room_id
+                     AND caller_entry.entry_date = shared_diary_entries.entry_date
+                     AND caller_entry.firebase_uid = $3
+                ) AS caller_has_entry
            FROM shared_diary_entries
           WHERE room_id = $1
           ORDER BY entry_date DESC, updated_at DESC
           LIMIT $2`,
-        [roomId, limit],
+        [roomId, limit, req.user.uid],
       );
-      res.json({ entries: result.rows.map(entryJson) });
+      res.json({ entries: result.rows.map((entry) => sharedEntryJson(entry, req.user.uid)) });
     } catch (error) {
       next(error);
     }
@@ -1153,6 +1181,7 @@ export function createApp({ pool, verifyToken }) {
   app.get("/api/rooms/:roomId/entries", requireAuth, listRoomEntries);
   app.get("/api/rooms/:roomId/history", requireAuth, listRoomEntries);
   app.get("/api/diaries/:roomId/entries", requireAuth, listRoomEntries);
+  app.get("/api/diaries/:roomId/history", requireAuth, listRoomEntries);
 
   async function createRoomEntry(req, res, next) {
     try {

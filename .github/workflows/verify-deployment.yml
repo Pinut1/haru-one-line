@@ -1,0 +1,29 @@
+name: Verify production deployment
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Wait for Vercel and compare public assets
+        run: >-
+          node scripts/verify-deployment.js
+          --retries 20
+          --retry-delay-ms 15000
+          --timeout-ms 10000

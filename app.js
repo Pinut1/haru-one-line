@@ -8,6 +8,8 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-auth.js";
 
 const ENTRIES_KEY = "haru_entries";
+const PREVIEW_SHARED_KEY = "haru_preview_shared_entries";
+const LOCKED_ENTRY_TEXT = "친구가 작성했어요. 나도 쓰면 내용이 열려요.";
 const MOOD_COLORS = new Set(["sage", "blue", "yellow", "orange", "rose", "lavender"]);
 const FIREBASE_CONFIG = window.HARU_FIREBASE_CONFIG;
 const API_URL = (window.HARU_API_URL || "http://localhost:3000").replace(/\/$/, "");
@@ -159,6 +161,14 @@ function dataKey() {
 function getLocalEntries() {
   try {
     return JSON.parse(localStorage.getItem(dataKey()) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function getPreviewSharedEntries() {
+  try {
+    return JSON.parse(localStorage.getItem(PREVIEW_SHARED_KEY) || "[]");
   } catch {
     return [];
   }
@@ -488,7 +498,8 @@ function drawRooms() {
     } else {
       for (const entry of recentEntries.slice(0, 3)) {
         const line = document.createElement("p");
-        line.textContent = `${entry.firebase_uid === currentUser?.uid ? "나" : "친구"} · ${entry.content}`;
+        const content = entry.is_locked || entry.content === null ? LOCKED_ENTRY_TEXT : entry.content;
+        line.textContent = `${entry.firebase_uid === currentUser?.uid ? "나" : "친구"} · ${content}`;
         const when = document.createElement("small");
         when.textContent = shortDateText(entry.entry_date);
         line.append(" ", when);
@@ -853,12 +864,41 @@ async function saveProfile() {
 function showPreviewShared() {
   $("#createRoomButton").disabled = true;
   $("#joinForm").hidden = true;
-  $("#roomDetail").hidden = true;
-  $("#roomsList").hidden = false;
-  $(".room-list-title").hidden = false;
-  $("#roomsList").innerHTML = '<p class="empty">공유 다이어리는 로그인 후 사용할 수 있어요.<br>프리뷰에서는 개인 기록만 이 브라우저에 저장됩니다.</p>';
+  const date = localDate();
+  const ownEntries = getPreviewSharedEntries();
+  const friendContent = "오늘 산책길의 바람이 좋았어.";
+  const callerWroteToday = ownEntries.some((entry) => entry.entry_date === date);
+  const friendEntry = {
+    id: "preview-friend-entry",
+    room_id: "preview-room",
+    firebase_uid: "preview-friend",
+    entry_date: date,
+    content: callerWroteToday ? friendContent : null,
+    is_locked: !callerWroteToday,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  activeRoom = {
+    room: {
+      id: "preview-room",
+      name: "프리뷰 교환 일기",
+      owner_uid: "preview-friend",
+      role: "member",
+      member_count: 2,
+      recent_entries: [friendEntry, ...ownEntries],
+    },
+    members: [
+      { firebase_uid: "preview-friend", role: "owner" },
+      { firebase_uid: "preview", role: "member" },
+    ],
+    entries: [friendEntry, ...ownEntries],
+  };
+  drawRoomDetail();
+  $("#leaveRoomButton").hidden = true;
   $("#roomCount").textContent = "프리뷰";
-  setSharedStatus("프리뷰는 로컬 전용입니다. 서버로 전송되는 내용이 없어요.");
+  setSharedStatus(callerWroteToday
+    ? "같은 날짜에 나도 써서 친구의 내용이 열렸어요. 프리뷰 기록은 이 브라우저에만 저장됩니다."
+    : "친구가 오늘 먼저 썼어요. 같은 날짜에 한 줄을 남겨 내용을 열어 보세요. 프리뷰는 로컬 전용입니다.");
 }
 
 function restoreSharedControls() {
@@ -947,7 +987,8 @@ function drawRoomEntries(entries) {
     author.className = "shared-entry-author";
     author.textContent = entry.firebase_uid === currentUser?.uid ? "나" : "친구";
     const paragraph = document.createElement("p");
-    paragraph.textContent = entry.content;
+    paragraph.textContent = entry.is_locked || entry.content === null ? LOCKED_ENTRY_TEXT : entry.content;
+    paragraph.classList.toggle("locked-entry", Boolean(entry.is_locked));
     if ((entry.content || "").includes("\n")) {
       paragraph.classList.add("multiline");
     }
@@ -1107,7 +1148,7 @@ async function copyInvite() {
 
 async function submitSharedEntry(event) {
   event.preventDefault();
-  if (!activeRoom?.room || !currentUser || currentUser.isPreview) return;
+  if (!activeRoom?.room || !currentUser) return;
   const content = $("#sharedInput").value.trim();
   const date = $("#sharedDate").value;
   if (!content || !date) return;
@@ -1116,6 +1157,27 @@ async function submitSharedEntry(event) {
   button.disabled = true;
   const wasEditing = Boolean(editingEntryId);
   try {
+    if (currentUser.isPreview) {
+      const entries = getPreviewSharedEntries();
+      const existingIndex = entries.findIndex((entry) =>
+        editingEntryId ? entry.id === editingEntryId : entry.entry_date === date);
+      const entry = {
+        id: existingIndex >= 0 ? entries[existingIndex].id : crypto.randomUUID(),
+        room_id: "preview-room",
+        firebase_uid: currentUser.uid,
+        entry_date: date,
+        content,
+        is_locked: false,
+        created_at: existingIndex >= 0 ? entries[existingIndex].created_at : new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      if (existingIndex >= 0) entries[existingIndex] = entry;
+      else entries.unshift(entry);
+      localStorage.setItem(PREVIEW_SHARED_KEY, JSON.stringify(entries));
+      showPreviewShared();
+      resetEditor();
+      return;
+    }
     const path = `/api/rooms/${activeRoom.room.id}/entries`;
     if (editingEntryId) {
       await apiRequest(`${path}/${editingEntryId}`, {
@@ -1138,9 +1200,17 @@ async function submitSharedEntry(event) {
 }
 
 async function deleteSharedEntry(entryId) {
-  if (!activeRoom?.room || !currentUser || currentUser.isPreview) return;
+  if (!activeRoom?.room || !currentUser) return;
   if (!window.confirm("이 기록을 삭제할까요?")) return;
   try {
+    if (currentUser.isPreview) {
+      localStorage.setItem(PREVIEW_SHARED_KEY, JSON.stringify(
+        getPreviewSharedEntries().filter((entry) => entry.id !== entryId),
+      ));
+      showPreviewShared();
+      setSharedStatus("프리뷰 기록을 삭제했어요. 친구의 내용이 다시 잠겼습니다.");
+      return;
+    }
     await apiRequest(`/api/rooms/${activeRoom.room.id}/entries/${entryId}`, { method: "DELETE" });
     await refreshActiveRoom();
     setSharedStatus("기록을 삭제했어요.");
